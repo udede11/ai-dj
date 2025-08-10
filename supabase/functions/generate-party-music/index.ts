@@ -14,6 +14,9 @@ serve(async (req) => {
 
   try {
     const { partyId, prompt, analyses } = await req.json()
+    
+    console.log('Received request with prompt:', prompt)
+    console.log('Analyses count:', analyses?.length || 0)
 
     // Initialize Supabase client
     const supabaseUrl = Deno.env.get('SUPABASE_URL')!
@@ -28,6 +31,7 @@ serve(async (req) => {
 
     // Use provided prompt or create one from analyses
     let musicPrompt = prompt
+    console.log('Initial musicPrompt:', musicPrompt)
     let avgEnergy = 0.5
     let avgBpm = 120
     let topGenre = 'electronic'

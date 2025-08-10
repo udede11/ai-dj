@@ -61,6 +61,13 @@ serve(async (req) => {
    No music currently playing. Recommend initial music.
    `}
 
+IMPORTANT - Follow Beatoven AI prompt guidelines:
+- DO NOT mention BPM numbers in prompts, use: slow, medium, fast, upbeat, chill, laidback
+- DO NOT use musical theory terms (keys, scales, chords, time signatures)
+- DO specify: genre, instruments, mood, tempo description, duration
+- Focus on emotional and atmospheric descriptions
+- Example: "Chill lo-fi track with soft piano and ambient pads, slow tempo, relaxed mood for conversation. 1 minute."
+
 Return JSON with:
 {
   "mood": "string",
@@ -70,9 +77,9 @@ Return JSON with:
   "description": "string",
   "shouldChangeMusic": boolean,
   "reason": "string explaining decision",
-  "musicPrompt": "string (only if shouldChangeMusic is true)",
+  "musicPrompt": "string - Beatoven-optimized prompt WITHOUT BPM numbers",
   "recommendedGenre": "string",
-  "recommendedBpm": number
+  "recommendedBpm": number (for internal use only, not in prompt)
 }`
 
     // Prepare images for GPT-5
@@ -121,13 +128,35 @@ Return JSON with:
           try {
             analysis = JSON.parse(textContent.text)
             console.log('Parsed analysis:', analysis)
+            
+            // Ensure musicPrompt exists and follows Beatoven guidelines
+            if (!analysis.musicPrompt) {
+              // Generate a default prompt based on analysis WITHOUT BPM
+              const genre = analysis.recommendedGenre || 'electronic'
+              const bpm = analysis.recommendedBpm || 120
+              const mood = analysis.mood || 'party'
+              
+              // Convert BPM to tempo description
+              let tempoDesc = 'medium tempo'
+              if (bpm < 90) tempoDesc = 'slow tempo'
+              else if (bpm < 110) tempoDesc = 'relaxed tempo'
+              else if (bpm < 130) tempoDesc = 'medium tempo'
+              else if (bpm < 150) tempoDesc = 'upbeat tempo'
+              else tempoDesc = 'fast tempo'
+              
+              analysis.musicPrompt = `${mood.toLowerCase()} ${genre} track with engaging rhythm and melodic elements, ${tempoDesc}, party background mood. 30 seconds.`
+              console.log('Generated fallback prompt:', analysis.musicPrompt)
+            }
           } catch (e) {
             console.error('Failed to parse AI response:', e)
             analysis = {
               mood: "Party Mode",
               energy_level: 0.5,
               shouldChangeMusic: !musicContext.currentGenre,
-              reason: "Analysis in progress"
+              reason: "Analysis in progress",
+              musicPrompt: "Upbeat electronic party track with driving bass and energetic synths, medium tempo, energetic mood. 30 seconds.",
+              recommendedGenre: "electronic",
+              recommendedBpm: 120
             }
           }
         }
@@ -160,11 +189,18 @@ Return JSON with:
       if (historyError) console.error('Failed to add history:', historyError)
     }
 
-    // Handle music generation if needed
+    // Handle music generation if needed - FAST PATH for first music
     let newTrackUrl = null
-    if (analysis.shouldChangeMusic && analysis.musicPrompt) {
+    let taskId = null
+    
+    if ((analysis.shouldChangeMusic || !musicContext.currentGenre) && analysis.musicPrompt) {
       console.log('Generating new music with prompt:', analysis.musicPrompt)
       
+      if (!beatovenKey) {
+        console.error('BEATOVEN_API_KEY not configured!')
+        analysis.error = 'Music generation unavailable - API key missing'
+        analysis.taskId = null
+      } else {
       // Call Beatoven API
       const composeResponse = await fetch('https://public-api.beatoven.ai/api/v1/tracks/compose', {
         method: 'POST',
@@ -181,13 +217,19 @@ Return JSON with:
         })
       })
 
+      console.log('Beatoven compose response status:', composeResponse.status)
+      
       if (composeResponse.ok) {
         const composeResult = await composeResponse.json()
-        const taskId = composeResult.task_id
+        taskId = composeResult.task_id
+        console.log('Got task ID:', taskId)
         
-        // Poll for completion (simplified - in production would be async)
+        // For first track, wait up to 20 seconds
+        // For subsequent tracks, only wait 5 seconds then return taskId
+        const maxAttempts = !musicContext.currentGenre ? 20 : 5
+        
         let attempts = 0
-        while (attempts < 15 && !newTrackUrl) {
+        while (attempts < maxAttempts && !newTrackUrl) {
           await new Promise(resolve => setTimeout(resolve, 1000))
           
           const statusResponse = await fetch(`https://public-api.beatoven.ai/api/v1/tasks/${taskId}`, {
@@ -211,9 +253,13 @@ Return JSON with:
                     bpm: analysis.recommendedBpm,
                     energy_match: analysis.energy_level,
                     song_title: `AI DJ - ${analysis.mood}`,
-                    artist: 'AI DJ'
+                    artist: 'AI DJ',
+                    track_url: newTrackUrl
                   })
               }
+              break
+            } else if (statusResult.status === 'failed') {
+              console.error('Music generation failed')
               break
             }
           }
@@ -224,8 +270,26 @@ Return JSON with:
         if (!newTrackUrl && taskId) {
           analysis.musicStatus = 'processing'
           analysis.taskId = taskId
+          
+          // Store task for later polling
+          if (partyId) {
+            await supabase
+              .from('music_queue')
+              .insert({
+                party_id: partyId,
+                genre: analysis.recommendedGenre,
+                bpm: analysis.recommendedBpm,
+                energy_match: analysis.energy_level,
+                song_title: `AI DJ - ${analysis.mood} (Generating)`,
+                artist: 'AI DJ',
+                task_id: taskId
+              })
+          }
         }
+      } else {
+        console.error('Beatoven compose failed:', composeResponse.status)
       }
+      } // Close the beatovenKey else block
     }
 
     return new Response(
